@@ -8,5 +8,10 @@
     "480p": "https://example.com/avatar-480p.mp4",
     "720p": "https://example.com/avatar-720p.mp4",
     "1080p": "https://example.com/avatar-1080p.mp4"
+  },
+  "ace": {
+    "480p": "https://example.com/avatar-480p.mp4",
+    "720p": "https://example.com/avatar-720p.mp4",
+    "1080p": "https://example.com/avatar-1080p.mp4"
   }
 }
