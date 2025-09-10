@@ -1,6 +1,6 @@
 import os
 import json
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 # Load movies database from movies.json
@@ -20,10 +20,19 @@ async def movie_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if query in movies_db:
         movie_links = movies_db[query]
-        reply_text = f"✅ Found *{query.title()}*:\n\n"
+
+        # Create inline keyboard buttons for each quality
+        keyboard = []
         for quality, link in movie_links.items():
-            reply_text += f"🔹 {quality}: {link}\n"
-        await update.message.reply_text(reply_text, parse_mode="Markdown")
+            keyboard.append([InlineKeyboardButton(f"{quality}", url=link)])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            f"✅ Found *{query.title()}*:",
+            parse_mode="Markdown",
+            reply_markup=reply_markup
+        )
     else:
         await update.message.reply_text("❌ Sorry, movie not available.")
 
