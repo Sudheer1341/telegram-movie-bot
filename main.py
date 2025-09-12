@@ -1,7 +1,7 @@
 import os
 import json
-import difflib
 import firebase_admin
+from thefuzz import process
 from firebase_admin import credentials, db
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
@@ -10,28 +10,21 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters, C
 BOT_TOKEN = os.getenv("BOT_TOKEN")  # Railway env variable
 ADMIN_ID = 1623981166  # 🔹 Replace with your Telegram numeric ID
 
-# Firebase setup (using service account JSON file)
-if os.getenv("FIREBASE_KEY"):  # If you stored key in Railway env var
+# Firebase setup
+if os.getenv("FIREBASE_KEY"):  # Railway env variable
     firebase_key = json.loads(os.getenv("FIREBASE_KEY"))
     cred = credentials.Certificate(firebase_key)
-else:  # Otherwise, load from file
+else:  # local file
     cred = credentials.Certificate("firebase_key.json")
 
 firebase_admin.initialize_app(cred, {
     'databaseURL': 'https://moviebotdb-28e2b-default-rtdb.firebaseio.com/'  # 🔹 Replace with your DB URL
 })
 
-# ------------------ HELPERS ------------------
-def find_movie(query, movies_db):
-    """Fuzzy search movie name."""
-    query = query.lower().strip()
-    if query in movies_db:
-        return query, None
-    matches = difflib.get_close_matches(query, movies_db.keys(), n=3, cutoff=0.4)
-    if matches:
-        return None, matches
-    return None, None
+# ------------------ STATE ------------------
+pending_requests = {}  # {user_id: {"matches": [...]}}
 
+# ------------------ HELPERS ------------------
 async def send_movie(update, movie_name, movie_links):
     """Send movie links as inline buttons."""
     keyboard = [
@@ -100,20 +93,52 @@ async def show_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ------------------ MOVIE HANDLER ------------------
 async def movie_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
     query = update.message.text.lower().strip()
-    
+
     ref = db.reference("movies")
     movies_db = ref.get() or {}
-    
-    exact, suggestions = find_movie(query, movies_db)
-    if exact:
-        await send_movie(update, exact, movies_db[exact])
-    elif suggestions:
-        await update.message.reply_text(
-            "❓ Did you mean:\n" + "\n".join([f"🔹 {s}" for s in suggestions])
-        )
+
+    # 🔹 Check if user is confirming a suggestion
+    if user_id in pending_requests:
+        matches = pending_requests[user_id]["matches"]
+
+        if query in ["yes", "yeah", "y"]:  # single match confirmed
+            best_match = matches[0]
+            await send_movie(update, best_match, movies_db[best_match])
+            del pending_requests[user_id]
+            return
+
+        elif query.isdigit() and 1 <= int(query) <= len(matches):  # user picks a number
+            chosen = matches[int(query) - 1]
+            await send_movie(update, chosen, movies_db[chosen])
+            del pending_requests[user_id]
+            return
+
+        else:
+            await update.message.reply_text("⚠️ Please reply with 'yes' or a number from the list.")
+            return
+
+    # 🔹 Exact match
+    if query in movies_db:
+        await send_movie(update, query, movies_db[query])
     else:
-        await update.message.reply_text("❌ Sorry, movie not available. Use /request to ask for it.")
+        # 🔹 Fuzzy search for close matches
+        matches = process.extract(query, movies_db.keys(), limit=3)
+        good_matches = [m[0] for m in matches if m[1] >= 60]  # threshold 60
+
+        if not good_matches:
+            await update.message.reply_text("❌ Sorry, movie not available. Use /request to ask for it.")
+        elif len(good_matches) == 1:
+            pending_requests[user_id] = {"matches": good_matches}
+            await update.message.reply_text(f"❓ Did you mean *{good_matches[0].title()}*? (yes/no)", parse_mode="Markdown")
+        else:
+            pending_requests[user_id] = {"matches": good_matches}
+            reply_text = "❓ Did you mean:\n\n"
+            for i, title in enumerate(good_matches, 1):
+                reply_text += f"{i}. {title.title()}\n"
+            reply_text += "\n👉 Reply with a number."
+            await update.message.reply_text(reply_text)
 
 # ------------------ MAIN ------------------
 def main():
