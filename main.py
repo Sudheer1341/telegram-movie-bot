@@ -18,7 +18,7 @@ else:  # Otherwise, load from file
     cred = credentials.Certificate("firebase_key.json")
 
 firebase_admin.initialize_app(cred, {
-    'databaseURL': 'https://YOUR_PROJECT_ID.firebaseio.com/'  # 🔹 Replace with your DB URL
+    'databaseURL': 'https://moviebotdb-28e2b-default-rtdb.firebaseio.com/'  # 🔹 Replace with your DB URL
 })
 
 # ------------------ HELPERS ------------------
