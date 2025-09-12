@@ -1,69 +1,56 @@
 import os
+import json
 import difflib
+import firebase_admin
+from firebase_admin import credentials, db
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from pymongo import MongoClient
 
-# ------------------ MongoDB Setup ------------------
-client = MongoClient(os.getenv("MONGO_URI"))  # Railway env var
-db = client["moviesdb"]
-movies_collection = db["movies"]
-requests_collection = db["requests"]
+# ------------------ CONFIG ------------------
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Railway env variable
+ADMIN_ID = 1623981166  # 🔹 Replace with your Telegram numeric ID
 
-# ------------------ DB Helpers ------------------
-def get_movie(name: str):
-    return movies_collection.find_one({"name": name.lower()})
+# Firebase setup (using service account JSON file)
+if os.getenv("FIREBASE_KEY"):  # If you stored key in Railway env var
+    firebase_key = json.loads(os.getenv("FIREBASE_KEY"))
+    cred = credentials.Certificate(firebase_key)
+else:  # Otherwise, load from file
+    cred = credentials.Certificate("firebase_key.json")
 
-def add_movie_db(name: str, quality: str, link: str):
-    movies_collection.update_one(
-        {"name": name.lower()},
-        {"$set": {f"links.{quality}": link}},
-        upsert=True
-    )
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://YOUR_PROJECT_ID.firebaseio.com/'  # 🔹 Replace with your DB URL
+})
 
-def get_all_movies():
-    return list(movies_collection.find())
-
-def add_request(user: str, movie_name: str):
-    requests_collection.insert_one({"user": user, "movie": movie_name})
-
-def get_requests():
-    return list(requests_collection.find())
-
-# ------------------ Utils ------------------
-def find_movie(query: str):
-    """Fuzzy match search for movie names from DB."""
+# ------------------ HELPERS ------------------
+def find_movie(query, movies_db):
+    """Fuzzy search movie name."""
     query = query.lower().strip()
-    movie = get_movie(query)
-    if movie:
-        return movie, None
-    
-    # Fuzzy match with all movie names
-    all_movies = [m["name"] for m in get_all_movies()]
-    matches = difflib.get_close_matches(query, all_movies, n=3, cutoff=0.4)
+    if query in movies_db:
+        return query, None
+    matches = difflib.get_close_matches(query, movies_db.keys(), n=3, cutoff=0.4)
     if matches:
         return None, matches
     return None, None
 
-async def send_movie(update, movie):
-    """Send movie with inline buttons for qualities."""
-    keyboard = []
-    for quality, link in movie["links"].items():
-        keyboard.append([InlineKeyboardButton(quality, url=link)])
+async def send_movie(update, movie_name, movie_links):
+    """Send movie links as inline buttons."""
+    keyboard = [
+        [InlineKeyboardButton(quality, url=link)]
+        for quality, link in movie_links.items()
+    ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text(
-        f"✅ Found *{movie['name'].title()}*:",
+        f"✅ Found *{movie_name.title()}*:",
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
 
-# ------------------ Commands ------------------
+# ------------------ COMMANDS ------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎬 Send me a movie name and I'll find it for you!")
 
-ADMIN_ID = 1623981166  # replace with your Telegram ID
-
 async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to add movies."""
     if update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("🚫 You are not allowed to use this command.")
         return
@@ -73,55 +60,64 @@ async def add_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     name, quality, link = context.args[0].lower(), context.args[1], context.args[2]
-    add_movie_db(name, quality, link)
+    ref = db.reference(f"movies/{name}")
+    ref.update({quality: link})
+    
     await update.message.reply_text(f"✅ Added {name.title()} - {quality}")
 
 async def request_movie(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Users can request unavailable movies."""
     if not context.args:
         await update.message.reply_text("Usage: /request <movie name>")
         return
     
     movie_name = " ".join(context.args)
-    add_request(update.message.from_user.username or "Unknown", movie_name)
-    await update.message.reply_text(
-        f"📩 Your request for *{movie_name}* has been noted.",
-        parse_mode="Markdown"
-    )
+    ref = db.reference("requests")
+    ref.push({
+        "user": update.message.from_user.username or "Unknown",
+        "movie": movie_name
+    })
+    
+    await update.message.reply_text(f"📩 Your request for *{movie_name}* has been noted.", parse_mode="Markdown")
 
 async def show_requests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin command to view all requests."""
     if update.message.from_user.id != ADMIN_ID:
         await update.message.reply_text("🚫 Only admin can use this command.")
         return
-
-    requests = get_requests()
+    
+    ref = db.reference("requests")
+    requests = ref.get() or {}
+    
     if not requests:
         await update.message.reply_text("📂 No movie requests yet.")
-    else:
-        text = "📋 *Requested Movies:*\n\n"
-        for r in requests:
-            text += f"👤 {r['user']} → 🎬 {r['movie']}\n"
-        await update.message.reply_text(text, parse_mode="Markdown")
+        return
+    
+    text = "📋 *Requested Movies:*\n\n"
+    for r in requests.values():
+        text += f"👤 {r['user']} → 🎬 {r['movie']}\n"
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-# ------------------ Movie Handler ------------------
+# ------------------ MOVIE HANDLER ------------------
 async def movie_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.lower().strip()
-    movie, suggestions = find_movie(query)
-
-    if movie:
-        await send_movie(update, movie)
+    
+    ref = db.reference("movies")
+    movies_db = ref.get() or {}
+    
+    exact, suggestions = find_movie(query, movies_db)
+    if exact:
+        await send_movie(update, exact, movies_db[exact])
     elif suggestions:
         await update.message.reply_text(
             "❓ Did you mean:\n" + "\n".join([f"🔹 {s}" for s in suggestions])
         )
     else:
-        await update.message.reply_text(
-            "❌ Sorry, movie not available. Use /request to ask for it."
-        )
+        await update.message.reply_text("❌ Sorry, movie not available. Use /request to ask for it.")
 
-# ------------------ Main ------------------
+# ------------------ MAIN ------------------
 def main():
-    token = os.getenv("BOT_TOKEN")  # Railway env var
-    app = Application.builder().token(token).build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("addmovie", add_movie))
